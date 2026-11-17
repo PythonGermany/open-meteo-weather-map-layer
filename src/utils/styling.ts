@@ -9,7 +9,7 @@ import type {
 	ResolvedBreakpointColorScale
 } from '../types';
 
-function findLastIndexLE(arr: number[], value: number): number {
+function findLastIndexLE(arr: ArrayLike<number>, value: number): number {
 	let lo = 0,
 		hi = arr.length - 1,
 		res = -1;
@@ -38,51 +38,32 @@ const lerpColor = (
 	return out;
 };
 
-export const getColor = (
-	colorScale: RenderableColorScale,
-	px: number,
-	blend: boolean = false,
-	// Optional reusable buffer for the blended result. Hot paths (the raster
-	// worker's per-pixel loop) pass one to avoid allocating an array per pixel.
-	// The non-blend path returns the scale's own colour, so `out` is ignored there.
-	out?: [number, number, number, number]
-): [number, number, number, number] => {
-	switch (colorScale.type) {
-		case 'rgba': {
-			const colors = colorScale.colors;
-			const deltaPerIndex = (colorScale.max - colorScale.min) / colors.length;
-			const pos = (px - colorScale.min) / deltaPerIndex;
-			const index = Math.min(colors.length - 1, Math.max(0, Math.floor(pos)));
-			if (!blend) return colors[index];
-			const next = Math.min(colors.length - 1, index + 1);
-			const t = Math.min(1, Math.max(0, pos - index));
-			return lerpColor(colors[index], colors[next], t, out);
-		}
-		case 'breakpoint': {
-			const breakpoints = colorScale.breakpoints;
-			const colors = colorScale.colors;
-			const index = Math.max(0, findLastIndexLE(breakpoints, px));
-			if (!blend) return colors[index];
-			const next = Math.min(colors.length - 1, index + 1);
-			const lo = breakpoints[index];
-			const hi = breakpoints[next];
-			const t = hi > lo ? Math.min(1, Math.max(0, (px - lo) / (hi - lo))) : 0;
-			return lerpColor(colors[index], colors[next], t, out);
-		}
-		default: {
-			// This ensures exhaustiveness checking
-			const _exhaustive: never = colorScale;
-			throw new Error(`Unknown color scale: ${_exhaustive}`);
-		}
+// Centre of each breakpoint band. Hard bands paint colors[i] over
+// [bp[i], bp[i+1]); the last band is open-ended, so its centre mirrors the
+// previous band's half width.
+const bandCentres = (breakpoints: number[]): Float64Array => {
+	const n = breakpoints.length;
+	const centres = new Float64Array(n);
+	for (let i = 0; i < n; i++) {
+		if (i < n - 1) centres[i] = (breakpoints[i] + breakpoints[i + 1]) / 2;
+		else if (i > 0) centres[i] = breakpoints[i] + (breakpoints[i] - breakpoints[i - 1]) / 2;
+		else centres[i] = breakpoints[i];
 	}
+	return centres;
 };
 
 // A colour lookup specialised to one scale, with the per-tile invariants
 // (rgba index scale, breakpoint/colour arrays) resolved once. The raster worker
 // builds this once per tile and calls it per pixel, avoiding the `switch` and the
-// `(max-min)/length` division that getColor repeats on every pixel. `out` is the
-// reusable blend buffer (ignored on the non-blend path, which returns the scale's
-// own colour).
+// `(max-min)/length` division per pixel.
+//
+// Blending anchors every colour at the centre of its hard band and fades only
+// between neighbouring centres, so band interiors keep their hard colour and
+// each transition is centred on its breakpoint. Values outside the outermost
+// centres keep the first/last colour.
+//
+// `out` is the reusable blend buffer. Paths that need no mixing (non-blend, or
+// beyond the outermost centres) return the scale's own colour instead.
 export type ColorSampler = (
 	px: number,
 	out: [number, number, number, number]
@@ -103,11 +84,12 @@ export const makeColorSampler = (
 				return (px) => colors[Math.min(last, Math.max(0, Math.floor((px - min) * scale)))];
 			}
 			return (px, out) => {
-				const pos = (px - min) * scale;
-				const index = Math.min(last, Math.max(0, Math.floor(pos)));
-				const next = Math.min(last, index + 1);
-				const t = Math.min(1, Math.max(0, pos - index));
-				return lerpColor(colors[index], colors[next], t, out);
+				// Cell i spans [i, i+1), so its colour sits at i + 0.5
+				const pos = (px - min) * scale - 0.5;
+				if (!(pos > 0)) return colors[0];
+				if (pos >= last) return colors[last];
+				const index = Math.floor(pos);
+				return lerpColor(colors[index], colors[index + 1], pos - index, out);
 			};
 		}
 		case 'breakpoint': {
@@ -117,13 +99,15 @@ export const makeColorSampler = (
 			if (!blend) {
 				return (px) => colors[Math.max(0, findLastIndexLE(breakpoints, px))];
 			}
+			const centres = bandCentres(breakpoints);
 			return (px, out) => {
-				const index = Math.max(0, findLastIndexLE(breakpoints, px));
-				const next = Math.min(last, index + 1);
-				const lo = breakpoints[index];
-				const hi = breakpoints[next];
-				const t = hi > lo ? Math.min(1, Math.max(0, (px - lo) / (hi - lo))) : 0;
-				return lerpColor(colors[index], colors[next], t, out);
+				// Lower of the two centres px lies between
+				const index = findLastIndexLE(centres, px);
+				if (index < 0) return colors[0];
+				if (index >= last) return colors[last];
+				const lo = centres[index];
+				const t = (px - lo) / (centres[index + 1] - lo);
+				return lerpColor(colors[index], colors[index + 1], t, out);
 			};
 		}
 		default: {
@@ -133,6 +117,14 @@ export const makeColorSampler = (
 		}
 	}
 };
+
+export const getColor = (
+	colorScale: RenderableColorScale,
+	px: number,
+	blend: boolean = false,
+	// Optional reusable buffer for the blended result, see `ColorSampler`.
+	out: [number, number, number, number] = [0, 0, 0, 0]
+): [number, number, number, number] => makeColorSampler(colorScale, blend)(px, out);
 
 const transformScale = (
 	scale: BreakpointColorScale,
