@@ -40,11 +40,34 @@ describe('getColor', () => {
 	test('blend leaves values below the first visible precipitation band transparent', () => {
 		const precipitation = getColorScale('precipitation', false);
 		// first band 0.01–0.055 mm/h is transparent in hard mode
-		for (const px of [0, 0.01, 0.02, 0.03]) {
+		for (const px of [0, 0.01, 0.02, 0.03, 0.05, 0.0549]) {
 			expect(getColor(precipitation, px, true)[3]).toBe(0);
 		}
-		// fades in across the breakpoint 0.055 instead of across the whole band
-		expect(getColor(precipitation, 0.05, true)[3]).toBeLessThan(0.2);
+		// fades in only above the breakpoint, reaching band 1 at its centre
+		expect(getColor(precipitation, 0.06, true)[3]).toBeGreaterThan(0);
+		expect(getColor(precipitation, 0.06, true)[3]).toBeLessThan(0.4);
+	});
+
+	test('blend fades next to a transparent band only on the visible side', () => {
+		const s: RenderableColorScale = {
+			type: 'breakpoint',
+			unit: '',
+			breakpoints: [0, 10, 20, 30],
+			colors: [
+				[0, 0, 0, 1],
+				[0, 0, 0, 0],
+				[100, 0, 0, 1],
+				[200, 0, 0, 1]
+			]
+		};
+		// band 1 [10, 20) stays fully transparent
+		for (const px of [10, 12, 15, 19.9]) expect(getColor(s, px, true)[3]).toBe(0);
+		// band 0 fades out from its centre 5 up to the edge at 10
+		expect(getColor(s, 7.5, true)[3]).toBe(0.5);
+		// band 2 fades in from the edge at 20 up to its centre 25
+		expect(getColor(s, 22.5, true)[3]).toBe(0.5);
+		// the edge between two visible bands stays centred
+		expect(getColor(s, 30, true)).toEqual([150, 0, 0, 1]);
 	});
 
 	test('blend matches hard colours at every band centre', () => {
@@ -118,6 +141,21 @@ describe('getColor rgba', () => {
 		expect(getColor(rgba, -5, true)).toEqual([0, 0, 0, 1]);
 		expect(getColor(rgba, 2, true)).toEqual([0, 0, 0, 1]);
 		expect(getColor(rgba, 40, true)).toEqual([200, 0, 0, 1]);
+	});
+
+	test('blend keeps a transparent cell fully transparent', () => {
+		const s: RenderableColorScale = {
+			...rgba,
+			colors: [
+				[0, 0, 0, 0],
+				[100, 0, 0, 1],
+				[200, 0, 0, 1]
+			]
+		};
+		for (const px of [0, 5, 9.9]) expect(getColor(s, px, true)[3]).toBe(0);
+		// fades in from the cell edge at 10 up to the next centre at 15
+		expect(getColor(s, 12.5, true)[3]).toBe(0.5);
+		expect(getColor(s, 15, true)).toEqual([100, 0, 0, 1]);
 	});
 });
 

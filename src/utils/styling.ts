@@ -5,6 +5,7 @@ import type {
 	BreakpointColorScale,
 	ColorScale,
 	ColorScales,
+	RGBA,
 	RenderableColorScale,
 	ResolvedBreakpointColorScale
 } from '../types';
@@ -52,6 +53,24 @@ const bandCentres = (breakpoints: number[]): Float64Array => {
 	return centres;
 };
 
+// Blend weight of `px` in the transition from `from` (anchored at `lo`) to `to`
+// (anchored at `hi`) across the band edge `edge`. A fully transparent side
+// keeps its whole band transparent, as it is without blending, so the fade
+// happens only on the visible side of the edge.
+const transitionT = (
+	px: number,
+	lo: number,
+	edge: number,
+	hi: number,
+	from: RGBA,
+	to: RGBA
+): number => {
+	const start = from[3] === 0 ? edge : lo;
+	const end = to[3] === 0 ? edge : hi;
+	if (end <= start) return px < edge ? 0 : 1;
+	return Math.min(1, Math.max(0, (px - start) / (end - start)));
+};
+
 // A colour lookup specialised to one scale, with the per-tile invariants
 // (rgba index scale, breakpoint/colour arrays) resolved once. The raster worker
 // builds this once per tile and calls it per pixel, avoiding the `switch` and the
@@ -59,8 +78,9 @@ const bandCentres = (breakpoints: number[]): Float64Array => {
 //
 // Blending anchors every colour at the centre of its hard band and fades only
 // between neighbouring centres, so band interiors keep their hard colour and
-// each transition is centred on its breakpoint. Values outside the outermost
-// centres keep the first/last colour.
+// each transition is centred on its breakpoint. Next to a fully transparent
+// band the transition lies only on the visible side (see `transitionT`).
+// Values outside the outermost centres keep the first/last colour.
 //
 // `out` is the reusable blend buffer. Paths that need no mixing (non-blend, or
 // beyond the outermost centres) return the scale's own colour instead.
@@ -89,7 +109,10 @@ export const makeColorSampler = (
 				if (!(pos > 0)) return colors[0];
 				if (pos >= last) return colors[last];
 				const index = Math.floor(pos);
-				return lerpColor(colors[index], colors[index + 1], pos - index, out);
+				const from = colors[index];
+				const to = colors[index + 1];
+				const t = transitionT(pos, index, index + 0.5, index + 1, from, to);
+				return lerpColor(from, to, t, out);
 			};
 		}
 		case 'breakpoint': {
@@ -105,9 +128,11 @@ export const makeColorSampler = (
 				const index = findLastIndexLE(centres, px);
 				if (index < 0) return colors[0];
 				if (index >= last) return colors[last];
-				const lo = centres[index];
-				const t = (px - lo) / (centres[index + 1] - lo);
-				return lerpColor(colors[index], colors[index + 1], t, out);
+				const from = colors[index];
+				const to = colors[index + 1];
+				const edge = breakpoints[index + 1];
+				const t = transitionT(px, centres[index], edge, centres[index + 1], from, to);
+				return lerpColor(from, to, t, out);
 			};
 		}
 		default: {
